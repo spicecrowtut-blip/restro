@@ -350,6 +350,7 @@
               <p class="dish-description">Джин, лимон и бузина с лёгкой цитрусовой нотой.</p>
             </article>
           </div>
+          <p class="menu-message" id="menu-message" aria-live="polite"></p>
         </div>
       </section>
 
@@ -365,7 +366,7 @@
             <div class="field"><label for="guest-phone">Телефон</label><input id="guest-phone" name="phone" type="tel" autocomplete="tel" placeholder="+996" required /></div>
             <div class="field"><label for="guest-count">Количество гостей</label><select id="guest-count" name="guests"><option>1 гость</option><option selected>2 гостя</option><option>3 гостя</option><option>4 гостя</option><option>5 гостей</option><option>6 гостей</option><option>7 и более</option></select></div>
             <div class="field"><label for="booking-date">Дата</label><input id="booking-date" name="date" type="date" required /></div>
-            <div class="field"><label for="booking-time">Время</label><input id="booking-time" name="time" type="time" min="12:00" max="22:00" required /></div>
+            <div class="field"><label for="booking-time">Время</label><input id="booking-time" name="time" type="time" max="22:00" required /></div>
             <div class="field field-wide"><label for="booking-note">Пожелания к вечеру</label><textarea id="booking-note" name="note" placeholder="Особый повод, предпочтения по столу"></textarea></div>
             <button class="button" type="submit">Отправить заявку</button>
             <p class="form-message field-wide" aria-live="polite"></p>
@@ -390,7 +391,7 @@
         <div class="wrap visit-grid">
           <div><p class="eyebrow">Будем рады вам</p><h2 class="display" id="visit-title">До встречи в Borcelle</h2><p class="section-copy">Выберите удобное время — мы подготовим стол и позаботимся о вашем вечере.</p><a class="button" href="#reservation" style="margin-top: 20px">Забронировать стол</a></div>
           <dl class="visit-details">
-            <div><dt>График работы</dt><dd>Ежедневно<br />12:00–23:00</dd></div>
+            <div><dt>График работы</dt><dd>Ежедневно<br />6:00–23:00</dd></div>
             <div><dt>Бронирование</dt><dd>По предварительной заявке</dd></div>
             <div><dt>Кухня</dt><dd>Авторская европейская</dd></div>
             <div><dt>Адрес</dt><dd>Сообщим при подтверждении брони</dd></div>
@@ -465,6 +466,7 @@
       const bookingForm = document.querySelector('.booking-form');
       const dateInput = document.querySelector('#booking-date');
       const dishGrid = document.querySelector('.dish-grid');
+      const menuMessage = document.querySelector('#menu-message');
       const adminPanel = document.querySelector('#admin-panel');
       const adminForm = document.querySelector('#admin-form');
       const adminList = document.querySelector('#admin-list');
@@ -492,18 +494,19 @@
       let bookingRecords = [];
       let bookingRefreshTimer = null;
 
-      try {
-        const savedDishes = JSON.parse(localStorage.getItem('borcelle-menu'));
-        if (Array.isArray(savedDishes)) dishes = savedDishes;
-      } catch {
-        dishes = defaultDishes;
-      }
-
       const formatPrice = (price) => `${Number(price).toLocaleString('ru-RU')} сом`;
 
       function renderPublicMenu() {
         dishGrid.replaceChildren();
-        dishes.filter((dish) => dish.available && (activeFilter === 'all' || dish.category === activeFilter)).forEach((dish) => {
+        const visibleDishes = dishes.filter((dish) => dish.available && (activeFilter === 'all' || dish.category === activeFilter));
+        if (visibleDishes.length === 0) {
+          menuMessage.textContent = dishes.length === 0
+            ? 'Меню пока пусто. Скоро здесь появятся блюда.'
+            : 'В этой категории пока нет опубликованных блюд.';
+          return;
+        }
+        menuMessage.textContent = '';
+        visibleDishes.forEach((dish) => {
           const card = document.createElement('article');
           card.className = 'dish-card';
           card.dataset.category = dish.category;
@@ -527,16 +530,6 @@
           card.append(image, topline, description);
           dishGrid.append(card);
         });
-      }
-
-      function saveDishes() {
-        try {
-          localStorage.setItem('borcelle-menu', JSON.stringify(dishes));
-          return true;
-        } catch {
-          adminMessage.textContent = 'Не удалось сохранить изменения в этом браузере.';
-          return false;
-        }
       }
 
       function renderAdminList() {
@@ -600,6 +593,29 @@
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || 'Не удалось связаться с сервером.');
         return result;
+      }
+
+      async function loadMenu() {
+        try {
+          const result = await apiRequest('/api/menu');
+          dishes = result.dishes;
+          renderPublicMenu();
+        } catch (error) {
+          menuMessage.textContent = error.message;
+        }
+      }
+
+      async function loadAdminMenu() {
+        try {
+          const result = await apiRequest('/api/admin/menu');
+          dishes = result.dishes;
+          adminMessage.textContent = '';
+          renderPublicMenu();
+          renderAdminList();
+        } catch (error) {
+          adminMessage.textContent = error.message;
+          if (error.message.includes('Необходим вход')) setAdminAuthenticated(false);
+        }
       }
 
       function setAdminAuthenticated(isAuthenticated) {
@@ -684,7 +700,7 @@
           const session = await apiRequest('/api/admin/session');
           if (!session.authenticated) return;
           setAdminAuthenticated(true);
-          renderAdminList();
+          await loadAdminMenu();
           await loadBookings();
         } catch {
           adminLoginMessage.textContent = '';
@@ -732,7 +748,7 @@
           });
           adminLoginForm.reset();
           setAdminAuthenticated(true);
-          renderAdminList();
+          await loadAdminMenu();
           await loadBookings();
         } catch (error) {
           adminLoginMessage.textContent = error.message;
@@ -761,6 +777,7 @@
           document.querySelector('#admin-view-menu').hidden = tab.dataset.adminView !== 'menu';
           document.querySelector('#admin-view-bookings').hidden = tab.dataset.adminView !== 'bookings';
           if (tab.dataset.adminView === 'bookings') loadBookings();
+          else loadAdminMenu();
         });
       });
 
@@ -786,7 +803,7 @@
         if (event.key === 'Escape' && !adminPanel.hidden) closeAdminPanel();
       });
 
-      adminForm.addEventListener('submit', (event) => {
+      adminForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const formData = new FormData(adminForm);
         let imageUrl;
@@ -805,19 +822,24 @@
           description: formData.get('description').trim(),
           image: imageUrl.href
         };
-        if (editingDishId) {
-          dishes = dishes.map((dish) => dish.id === editingDishId ? { ...dish, ...dishData } : dish);
-        } else {
-          dishes.push({ id: crypto.randomUUID(), ...dishData, available: true });
+        const submitButton = document.querySelector('#admin-submit');
+        submitButton.disabled = true;
+        try {
+          await apiRequest(
+            editingDishId ? `/api/admin/menu/${encodeURIComponent(editingDishId)}` : '/api/admin/menu',
+            { method: editingDishId ? 'PATCH' : 'POST', body: JSON.stringify(dishData) }
+          );
+          await loadAdminMenu();
+          resetAdminForm();
+        } catch (error) {
+          adminMessage.textContent = error.message;
+        } finally {
+          submitButton.disabled = false;
         }
-        if (!saveDishes()) return;
-        renderPublicMenu();
-        renderAdminList();
-        resetAdminForm();
       });
 
       document.querySelector('#admin-cancel').addEventListener('click', resetAdminForm);
-      adminList.addEventListener('click', (event) => {
+      adminList.addEventListener('click', async (event) => {
         const button = event.target.closest('button[data-action]');
         if (!button) return;
         const dish = dishes.find((item) => item.id === button.dataset.id);
@@ -839,12 +861,21 @@
         }
 
         if (button.dataset.action === 'delete' && !window.confirm(`Удалить блюдо «${dish.name}»?`)) return;
-        if (button.dataset.action === 'delete') dishes = dishes.filter((item) => item.id !== dish.id);
-        if (button.dataset.action === 'toggle') dishes = dishes.map((item) => item.id === dish.id ? { ...item, available: !item.available } : item);
-        if (saveDishes()) {
-          renderPublicMenu();
-          renderAdminList();
-          if (editingDishId === dish.id) resetAdminForm();
+        button.disabled = true;
+        try {
+          if (button.dataset.action === 'delete') {
+            await apiRequest(`/api/admin/menu/${encodeURIComponent(dish.id)}`, { method: 'DELETE' });
+          } else if (button.dataset.action === 'toggle') {
+            await apiRequest(`/api/admin/menu/${encodeURIComponent(dish.id)}/availability`, {
+              method: 'PATCH',
+              body: JSON.stringify({ available: !dish.available })
+            });
+          }
+          await loadAdminMenu();
+          if (editingDishId === dish.id && button.dataset.action === 'delete') resetAdminForm();
+        } catch (error) {
+          adminMessage.textContent = error.message;
+          button.disabled = false;
         }
       });
 
@@ -852,6 +883,7 @@
       dateInput.min = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
       document.querySelector('#year').textContent = String(today.getFullYear());
       renderPublicMenu();
+      loadMenu();
 
       bookingForm.addEventListener('submit', async (event) => {
         event.preventDefault();

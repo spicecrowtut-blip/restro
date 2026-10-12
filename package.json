@@ -11,7 +11,8 @@
     "start": "node server.js",
     "build": "vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "import:access": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\import-access.ps1"
   },
   "dependencies": {
     "dotenv": "^18.0.6",

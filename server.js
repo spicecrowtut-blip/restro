@@ -7,17 +7,24 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   clearAdminLoginAttempts,
+  deleteDish,
   ensureDatabase,
+  insertDish,
   insertBooking,
+  listMenu,
   listBookings,
   mapBooking,
   registerAdminLoginAttempt,
+  setDishAvailability,
+  updateDish,
   toggleBookingStatus
 } from './database.js';
+import { defaultDishes } from './menu.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const dataDirectory = join(root, 'data');
 const bookingsPath = join(dataDirectory, 'bookings.json');
+const menuPath = join(dataDirectory, 'menu.json');
 const usesDatabase = Boolean(process.env.DATABASE_URL);
 const enforceLoginRateLimit = process.env.NODE_ENV === 'production';
 const host = process.env.HOST || '0.0.0.0';
@@ -30,7 +37,9 @@ const maxBodyBytes = 16 * 1024;
 const sessions = new Map();
 const loginAttempts = new Map();
 let bookings = [];
+let menu = [];
 let writes = Promise.resolve();
+let menuWrites = Promise.resolve();
 
 function sendJson(response, status, data, headers = {}) {
   response.writeHead(status, {
@@ -72,10 +81,55 @@ function saveBookings() {
   return writes;
 }
 
+function saveMenu() {
+  const snapshot = JSON.stringify(menu, null, 2);
+  menuWrites = menuWrites.then(() => writeFile(menuPath, snapshot, 'utf8'));
+  return menuWrites;
+}
+
 function safeEquals(left, right) {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function readDish(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Переданы некорректные данные блюда.');
+  }
+  const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+  const category = typeof payload.category === 'string' ? payload.category : '';
+  const price = payload.price;
+  const description = typeof payload.description === 'string' ? payload.description.trim() : '';
+  const image = typeof payload.image === 'string' ? payload.image.trim() : '';
+
+  if (name.length < 2 || name.length > 70) throw new Error('Название должно содержать от 2 до 70 символов.');
+  if (!['starter', 'main', 'dessert', 'drink'].includes(category)) throw new Error('Выберите категорию блюда.');
+  if (typeof price !== 'number' || !Number.isFinite(price) || price < 0 || price > 100000000) {
+    throw new Error('Укажите корректную цену.');
+  }
+  if (description.length > 180) throw new Error('Описание должно быть короче 180 символов.');
+  try {
+    if (new URL(image).protocol !== 'https:') throw new Error('HTTPS required');
+  } catch {
+    throw new Error('Укажите корректную ссылку на фото с HTTPS.');
+  }
+
+  return { name, category, price, description, image };
+}
+
+function assertAdminConfiguration() {
+  if (process.env.NODE_ENV === 'production' && (
+    !process.env.BORCELLE_ADMIN_LOGIN
+    || !process.env.BORCELLE_ADMIN_PASSWORD
+    || !process.env.BORCELLE_SESSION_SECRET
+    || process.env.BORCELLE_SESSION_SECRET.length < 32
+  )) {
+    throw new Error('Set BORCELLE_ADMIN_LOGIN, BORCELLE_ADMIN_PASSWORD, and a BORCELLE_SESSION_SECRET of at least 32 characters in production.');
+  }
+  if (!adminPassword) {
+    throw new Error('Set BORCELLE_ADMIN_PASSWORD in the environment or local .env file.');
+  }
 }
 
 function getSession(request) {
@@ -119,6 +173,14 @@ function readBooking(payload) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'GET' && url.pathname === '/api/menu') {
+    const dishes = usesDatabase
+      ? await listMenu()
+      : menu.filter((dish) => dish.available);
+    sendJson(response, 200, { dishes });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/bookings') {
     let booking;
     try {
@@ -213,6 +275,118 @@ async function handleApi(request, response, url) {
       return;
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/admin/menu') {
+      const dishes = usesDatabase
+        ? await listMenu({ includeUnavailable: true })
+        : menu;
+      sendJson(response, 200, { dishes });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/admin/menu') {
+      let dish;
+      try {
+        dish = readDish(await readJson(request));
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+      assertAdminConfiguration();
+      if (usesDatabase) {
+        sendJson(response, 201, { dish: await insertDish(dish) });
+      } else {
+        const savedDish = { id: randomUUID(), ...dish, available: true };
+        menu.push(savedDish);
+        await saveMenu();
+        sendJson(response, 201, { dish: savedDish });
+      }
+      return;
+    }
+
+    const dishMatch = url.pathname.match(/^\/api\/admin\/menu\/([\w-]+)$/);
+    const availabilityMatch = url.pathname.match(/^\/api\/admin\/menu\/([\w-]+)\/availability$/);
+    if (request.method === 'PATCH' && dishMatch) {
+      let dish;
+      try {
+        dish = readDish(await readJson(request));
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+      assertAdminConfiguration();
+      if (usesDatabase) {
+        const updated = await updateDish(dishMatch[1], dish);
+        if (!updated) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+        sendJson(response, 200, { dish: updated });
+      } else {
+        const savedDish = menu.find((item) => item.id === dishMatch[1]);
+        if (!savedDish) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+        Object.assign(savedDish, dish);
+        await saveMenu();
+        sendJson(response, 200, { dish: savedDish });
+      }
+      return;
+    }
+
+    if (request.method === 'PATCH' && availabilityMatch) {
+      let payload;
+      try {
+        payload = await readJson(request);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+      if (typeof payload.available !== 'boolean') {
+        sendJson(response, 400, { error: 'Укажите статус публикации блюда.' });
+        return;
+      }
+      assertAdminConfiguration();
+      if (usesDatabase) {
+        const updated = await setDishAvailability(availabilityMatch[1], payload.available);
+        if (!updated) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+        sendJson(response, 200, { dish: updated });
+      } else {
+        const savedDish = menu.find((item) => item.id === availabilityMatch[1]);
+        if (!savedDish) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+        savedDish.available = payload.available;
+        await saveMenu();
+        sendJson(response, 200, { dish: savedDish });
+      }
+      return;
+    }
+
+    if (request.method === 'DELETE' && dishMatch) {
+      assertAdminConfiguration();
+      if (usesDatabase) {
+        if (!await deleteDish(dishMatch[1])) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+      } else {
+        const index = menu.findIndex((item) => item.id === dishMatch[1]);
+        if (index === -1) {
+          sendJson(response, 404, { error: 'Блюдо не найдено.' });
+          return;
+        }
+        menu.splice(index, 1);
+        await saveMenu();
+      }
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/admin/bookings') {
       const allBookings = usesDatabase
         ? (await listBookings()).map(mapBooking)
@@ -223,18 +397,7 @@ async function handleApi(request, response, url) {
 
     const statusMatch = url.pathname.match(/^\/api\/admin\/bookings\/([\w-]+)\/status$/);
     if (request.method === 'PATCH' && statusMatch) {
-      if (process.env.NODE_ENV === 'production' && (
-        !process.env.BORCELLE_ADMIN_LOGIN
-        || !process.env.BORCELLE_ADMIN_PASSWORD
-        || !process.env.BORCELLE_SESSION_SECRET
-        || process.env.BORCELLE_SESSION_SECRET.length < 32
-      )) {
-        throw new Error('Set BORCELLE_ADMIN_LOGIN, BORCELLE_ADMIN_PASSWORD, and a BORCELLE_SESSION_SECRET of at least 32 characters in production.');
-      }
-
-      if (!adminPassword) {
-        throw new Error('Set BORCELLE_ADMIN_PASSWORD in the environment or local .env file.');
-      }
+      assertAdminConfiguration();
 
       if (usesDatabase) {
         const updated = await toggleBookingStatus(statusMatch[1]);
@@ -300,6 +463,18 @@ if (usesDatabase) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     await writeFile(bookingsPath, '[]\n', 'utf8');
+  }
+  try {
+    menu = JSON.parse(await readFile(menuPath, 'utf8'));
+    if (!Array.isArray(menu)) throw new Error('Local menu data must be a JSON array.');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    menu = defaultDishes.map((dish, index) => ({
+      id: `default-${index + 1}`,
+      ...dish,
+      available: true
+    }));
+    await saveMenu();
   }
 }
 
